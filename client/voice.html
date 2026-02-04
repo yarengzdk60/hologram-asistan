@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hologram Assistant - Ses Modu</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Google Font -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      * {
+        box-sizing: border-box;
+        font-family: "Inter", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        height: 100vh;
+        background: radial-gradient(circle at top, #1a1f2b, #0b0f1a);
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .container {
+        width: 90%;
+        max-width: 600px;
+        padding: 40px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(15px);
+        box-shadow: 0 0 40px rgba(0, 255, 255, 0.05);
+        text-align: center;
+      }
+
+      .title {
+        font-size: 32px;
+        font-weight: 600;
+        margin-bottom: 10px;
+        letter-spacing: 1px;
+      }
+
+      .subtitle {
+        font-size: 14px;
+        color: #9aa4bf;
+        margin-bottom: 40px;
+      }
+
+      .mic-container {
+        margin: 40px 0;
+      }
+
+      .mic-button {
+        width: 200px;
+        height: 200px;
+        border-radius: 50%;
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        background: linear-gradient(
+          145deg,
+          rgba(255, 255, 255, 0.05),
+          rgba(255, 255, 255, 0.01)
+        );
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .mic-button::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(
+          circle,
+          rgba(0, 255, 255, 0.2),
+          transparent
+        );
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+
+      .mic-button:hover::before {
+        opacity: 1;
+      }
+
+      .mic-button:hover {
+        transform: scale(1.05);
+        box-shadow: 0 0 40px rgba(0, 255, 255, 0.3);
+        border-color: rgba(0, 255, 255, 0.5);
+      }
+
+      .mic-button.active {
+        background: linear-gradient(
+          145deg,
+          rgba(255, 0, 0, 0.2),
+          rgba(255, 0, 0, 0.1)
+        );
+        border-color: rgba(255, 0, 0, 0.5);
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+
+      .mic-button.active::before {
+        opacity: 1;
+        background: radial-gradient(
+          circle,
+          rgba(255, 0, 0, 0.3),
+          transparent
+        );
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.1);
+        }
+      }
+
+      .mic-icon {
+        font-size: 80px;
+        z-index: 1;
+        transition: transform 0.3s ease;
+      }
+
+      .mic-button:hover .mic-icon {
+        transform: scale(1.1);
+      }
+
+      .status {
+        margin-top: 30px;
+        font-size: 14px;
+        color: #7f8cff;
+        opacity: 0.8;
+        min-height: 40px;
+      }
+
+      .status.error {
+        color: #ff6b6b;
+      }
+
+      .status.success {
+        color: #51cf66;
+      }
+
+      .back-button {
+        margin-top: 30px;
+        padding: 10px 20px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.05);
+        color: #ffffff;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-size: 14px;
+      }
+
+      .back-button:hover {
+        background: rgba(255, 255, 255, 0.1);
+        transform: translateY(-2px);
+      }
+
+      .audio-player {
+        margin-top: 20px;
+        display: none;
+      }
+
+      .audio-player.active {
+        display: block;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="title">Ses Asistanı</div>
+      <div class="subtitle">Mikrofona basarak konuşun</div>
+
+      <div class="mic-container">
+        <div class="mic-button" id="micButton">
+          <div class="mic-icon">🎤</div>
+        </div>
+      </div>
+
+      <div class="status" id="statusText">
+        🔌 Backend bağlantısı bekleniyor...
+      </div>
+
+      <audio id="audioPlayer" class="audio-player" controls></audio>
+
+      <button class="back-button" onclick="window.location.href='index1.html'">
+        ← Geri Dön
+      </button>
+    </div>
+
+    <script>
+      const micButton = document.getElementById("micButton");
+      const statusText = document.getElementById("statusText");
+      const audioPlayer = document.getElementById("audioPlayer");
+      const WS_URL = "ws://localhost:8765";
+
+      let socket = null;
+      let isListening = false;
+      let currentMode = null; // Track current mode to prevent spam
+      let isPlayingAudio = false; // Prevent concurrent audio playback
+      let userInteracted = false; // Track user gesture for autoplay
+
+      let reconnectTimeout = null;
+      let reconnectAttempts = 0;
+      const MAX_RECONNECT_ATTEMPTS = 10;
+      const RECONNECT_DELAY = 3000;
+
+      // WebSocket bağlantısı
+      function connectWebSocket() {
+        try {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            return; // Already connected
+          }
+
+          socket = new WebSocket(WS_URL);
+
+          socket.onopen = () => {
+            reconnectAttempts = 0;
+            statusText.innerText = "✅ Backend'e bağlanıldı";
+            statusText.className = "status success";
+            
+            if (reconnectTimeout) {
+              clearTimeout(reconnectTimeout);
+              reconnectTimeout = null;
+            }
+            
+            // MODE GUARD: Only send if not already in VOICE mode
+            if (currentMode !== "VOICE") {
+              sendMode("VOICE");
+              currentMode = "VOICE";
+            }
+          };
+
+          socket.onmessage = (event) => {
+            console.log("[WS] ✅ Raw message received:", event.data);
+            try {
+              const message = JSON.parse(event.data);
+              console.log("[WS] 📦 Parsed message:", message);
+
+              if (message.type === "action" && message.action === "speak") {
+                console.log("[WS] 🔊 Speak action received!");
+                console.log("[WS] 📍 Audio path:", message.audio_path);
+                console.log("[WS] ⏱️ Duration:", message.duration);
+                // Ses dosyasını oynat
+                playAudio(message.audio_path, message.duration);
+                statusText.innerText = "🔊 Cevap oynatılıyor...";
+                statusText.className = "status success";
+              } else if (message.type === "error") {
+                console.log("[WS] ❌ Error message:", message.message);
+                // Error message from backend
+                statusText.innerText = "❌ " + message.message;
+                statusText.className = "status error";
+              } else {
+                console.log("[WS] ⚠️ Unknown message type:", message.type);
+              }
+            } catch (error) {
+              console.error("[WS] ❌ Message parsing error:", error);
+            }
+          };
+
+          socket.onerror = (error) => {
+            console.error("WebSocket error:", error);
+            statusText.innerText = "❌ Backend bağlantı hatası";
+            statusText.className = "status error";
+          };
+
+          socket.onclose = () => {
+            statusText.innerText = "⚠️ Bağlantı kesildi";
+            statusText.className = "status";
+            isListening = false;
+            micButton.classList.remove("active");
+            
+            // Auto-reconnect
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+              reconnectAttempts++;
+              reconnectTimeout = setTimeout(() => {
+                console.log(`Reconnecting... (attempt ${reconnectAttempts})`);
+                connectWebSocket();
+              }, RECONNECT_DELAY);
+            } else {
+              statusText.innerText = "❌ Bağlantı kurulamadı - Sunucuyu kontrol edin";
+              statusText.className = "status error";
+            }
+          };
+        } catch (error) {
+          console.error("WebSocket connection error:", error);
+          statusText.innerText = "❌ Bağlantı hatası: " + error.message;
+          statusText.className = "status error";
+        }
+      }
+
+      function sendMode(mode) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          console.warn("Cannot send mode - WebSocket not connected");
+          return;
+        }
+        
+        try {
+          socket.send(
+            JSON.stringify({
+              type: "mode",
+              value: mode,
+            })
+          );
+        } catch (error) {
+          console.error("Send mode error:", error);
+        }
+      }
+
+      function playAudio(audioPath, duration) {
+        console.log("[AUDIO] 🎵 Attempting to play:", audioPath);
+        
+        // Prevent concurrent playback
+        if (isPlayingAudio) {
+          console.log("[AUDIO] ⚠️ Already playing audio - stopping previous");
+          audioPlayer.pause();
+          audioPlayer.currentTime = 0;
+        }
+        
+        isPlayingAudio = true;
+        
+        // Set source
+        audioPlayer.src = audioPath;
+        console.log("[AUDIO] 📍 Source set to:", audioPath);
+        
+        // Remove old listeners to prevent duplicates
+        audioPlayer.oncanplaythrough = null;
+        audioPlayer.onloadeddata = null;
+        
+        // Wait for audio to be ready before playing
+        const playWhenReady = () => {
+          console.log("[AUDIO] ✅ Audio loaded and ready, starting playback");
+          audioPlayer.play()
+            .then(() => {
+              console.log("[AUDIO] ▶️ Playback started successfully");
+              audioPlayer.className = "audio-player active";
+            })
+            .catch((error) => {
+              console.error("[AUDIO] ❌ Play failed:", error);
+              isPlayingAudio = false;
+              
+              // Handle autoplay blocking
+              if (error.name === "NotAllowedError") {
+                console.warn("[AUDIO] 🚫 Autoplay blocked - waiting for user interaction");
+                statusText.innerText = "⚠️ Ses oynatmak için sayfaya tıklayın";
+                statusText.className = "status error";
+                
+                // Retry on next user interaction
+                const retryPlay = () => {
+                  console.log("[AUDIO] 🔄 Retrying playback after user click");
+                  audioPlayer.play().then(() => {
+                    console.log("[AUDIO] ✅ Playback started after user interaction");
+                    audioPlayer.className = "audio-player active";
+                    document.removeEventListener("click", retryPlay);
+                  }).catch(e => console.error("[AUDIO] ❌ Retry failed:", e));
+                };
+                document.addEventListener("click", retryPlay, { once: true });
+              } else {
+                statusText.innerText = "⚠️ Ses dosyası oynatılamadı: " + error.message;
+                statusText.className = "status error";
+              }
+            });
+        };
+        
+        // Listen for canplaythrough event
+        audioPlayer.addEventListener('canplaythrough', playWhenReady, { once: true });
+        
+        // Also handle load errors
+        audioPlayer.addEventListener('error', (e) => {
+          console.error("[AUDIO] ❌ Load error:", e);
+          console.error("[AUDIO] ❌ Error code:", audioPlayer.error?.code);
+          console.error("[AUDIO] ❌ Error message:", audioPlayer.error?.message);
+          isPlayingAudio = false;
+          statusText.innerText = "❌ Ses dosyası yüklenemedi";
+          statusText.className = "status error";
+        }, { once: true });
+        
+        // Force load
+        console.log("[AUDIO] 🔄 Loading audio file...");
+        audioPlayer.load();
+      }
+      
+      // Ses bittiğinde durumu güncelle
+      audioPlayer.addEventListener('ended', () => {
+        console.log("[AUDIO] ✅ Playback ended");
+        isPlayingAudio = false;
+        statusText.innerText = "✅ Hazır - Mikrofona basarak konuşun";
+        statusText.className = "status success";
+        audioPlayer.className = "audio-player";
+      });
+
+      let audioInitialized = false;
+
+      // Track user interaction for autoplay
+      micButton.addEventListener("click", () => {
+        userInteracted = true;
+        console.log("[USER] 👆 Mic button clicked - user gesture registered");
+        
+        // Initialize audio on first interaction
+        if (!audioInitialized) {
+          audioPlayer.load();
+          audioInitialized = true;
+          console.log("[AUDIO] 🎬 Audio element initialized after user gesture");
+        }
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          statusText.innerText = "⚠️ Backend bağlantısı bekleniyor...";
+          statusText.className = "status";
+          connectWebSocket(); // Try to reconnect
+          return;
+        }
+
+        try {
+          if (!isListening) {
+            // Dinlemeyi başlat - Backend'e bildir
+            isListening = true;
+            micButton.classList.add("active");
+            statusText.innerText = "🎤 Dinleniyor... Konuşun";
+            statusText.className = "status success";
+            
+            // Backend'e mikrofon aktif mesajı gönder
+            socket.send(
+              JSON.stringify({
+                type: "voice_control",
+                action: "start",
+              })
+            );
+          } else {
+            // Dinlemeyi durdur - Backend'e bildir
+            isListening = false;
+            micButton.classList.remove("active");
+            statusText.innerText = "⏸️ Dinleme durduruldu";
+            statusText.className = "status";
+            
+            // Backend'e mikrofon durdur mesajı gönder
+            socket.send(
+              JSON.stringify({
+                type: "voice_control",
+                action: "stop",
+              })
+            );
+          }
+        } catch (error) {
+          console.error("Mic button error:", error);
+          statusText.innerText = "❌ Hata: " + error.message;
+          statusText.className = "status error";
+          isListening = false;
+          micButton.classList.remove("active");
+        }
+      });
+
+      // Sayfa yüklendiğinde bağlan
+      connectWebSocket();
+    </script>
+  </body>
+</html>

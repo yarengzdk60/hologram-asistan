@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hologram Assistant</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Google Font -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      * {
+        box-sizing: border-box;
+        font-family: "Inter", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        height: 100vh;
+        background: radial-gradient(circle at top, #1a1f2b, #0b0f1a);
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .container {
+        width: 90%;
+        max-width: 900px;
+        padding: 40px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(15px);
+        box-shadow: 0 0 40px rgba(0, 255, 255, 0.05);
+        text-align: center;
+      }
+
+      .title {
+        font-size: 32px;
+        font-weight: 600;
+        margin-bottom: 10px;
+        letter-spacing: 1px;
+      }
+
+      .subtitle {
+        font-size: 14px;
+        color: #9aa4bf;
+        margin-bottom: 40px;
+      }
+
+      .buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 30px;
+      }
+
+      .mode-btn {
+        padding: 40px 20px;
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: linear-gradient(
+          145deg,
+          rgba(255, 255, 255, 0.05),
+          rgba(255, 255, 255, 0.01)
+        );
+        cursor: pointer;
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .mode-btn::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          120deg,
+          transparent,
+          rgba(0, 255, 255, 0.15),
+          transparent
+        );
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+
+      .mode-btn:hover::before {
+        opacity: 1;
+      }
+
+      .mode-btn:hover {
+        transform: translateY(-6px);
+        box-shadow: 0 10px 30px rgba(0, 255, 255, 0.15);
+      }
+
+      .mode-icon {
+        font-size: 42px;
+        margin-bottom: 20px;
+      }
+
+      .mode-title {
+        font-size: 20px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+
+      .mode-desc {
+        font-size: 14px;
+        color: #b8c1ff;
+      }
+
+      .status {
+        margin-top: 40px;
+        font-size: 13px;
+        color: #7f8cff;
+        opacity: 0.8;
+      }
+
+      @media (max-width: 700px) {
+        .buttons {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="title">Hologram Assistant</div>
+      <div class="subtitle">Mod seçimi – Kontrol sende</div>
+
+      <div class="buttons">
+        <div class="mode-btn" id="visionBtn">
+          <div class="mode-icon">👋</div>
+          <div class="mode-title">El salla – seni çekiyorum</div>
+          <div class="mode-desc">
+            Kamera aktif olur<br />
+            Hareket algılanır
+          </div>
+        </div>
+
+        <div class="mode-btn" id="voiceBtn">
+          <div class="mode-icon">🎤</div>
+          <div class="mode-title">Ses sende – derman bende</div>
+          <div class="mode-desc">
+            Mikrofon dinler<br />
+            Yapay zekâ cevap verir
+          </div>
+        </div>
+      </div>
+
+      <div class="status" id="statusText">
+        🔌 Backend bağlantısı bekleniyor...
+      </div>
+    </div>
+
+    <script>
+      const statusText = document.getElementById("statusText");
+      const visionBtn = document.getElementById("visionBtn");
+      const voiceBtn = document.getElementById("voiceBtn");
+
+      let socket = null;
+      let reconnectTimeout = null;
+      let reconnectAttempts = 0;
+      const MAX_RECONNECT_ATTEMPTS = 10;
+      const RECONNECT_DELAY = 3000;
+
+      function connectWebSocket() {
+        try {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            return; // Already connected
+          }
+
+          socket = new WebSocket("ws://localhost:8765");
+
+          socket.onopen = () => {
+            reconnectAttempts = 0;
+            statusText.innerText = "✅ Backend'e bağlanıldı";
+            if (reconnectTimeout) {
+              clearTimeout(reconnectTimeout);
+              reconnectTimeout = null;
+            }
+          };
+
+          socket.onerror = (error) => {
+            console.error("WebSocket error:", error);
+            statusText.innerText = "❌ Backend bağlantı hatası";
+          };
+
+          socket.onclose = () => {
+            statusText.innerText = "⚠️ Bağlantı kesildi";
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+              reconnectAttempts++;
+              reconnectTimeout = setTimeout(() => {
+                console.log(`Reconnecting... (attempt ${reconnectAttempts})`);
+                connectWebSocket();
+              }, RECONNECT_DELAY);
+            } else {
+              statusText.innerText =
+                "❌ Bağlantı kurulamadı - Sunucuyu kontrol edin";
+            }
+          };
+
+          socket.onmessage = (event) => {
+            try {
+              const message = JSON.parse(event.data);
+              console.log("Message received:", message);
+            } catch (error) {
+              console.error("Message parse error:", error);
+            }
+          };
+        } catch (error) {
+          console.error("WebSocket connection error:", error);
+          statusText.innerText = "❌ Bağlantı hatası: " + error.message;
+        }
+      }
+
+      function sendMode(mode) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          statusText.innerText = "⚠️ Bağlantı bekleniyor...";
+          return;
+        }
+
+        try {
+          socket.send(
+            JSON.stringify({
+              type: "mode",
+              value: mode,
+            }),
+          );
+
+          statusText.innerText = `🧠 Aktif mod: ${mode}`;
+        } catch (error) {
+          console.error("Send error:", error);
+          statusText.innerText = "❌ Mesaj gönderilemedi";
+        }
+      }
+
+      visionBtn.onclick = () => {
+        window.location.href = "index.html";
+      };
+      voiceBtn.onclick = () => {
+        window.location.href = "voice.html";
+      };
+
+      // Connect on page load
+      connectWebSocket();
+    </script>
+  </body>
+</html>

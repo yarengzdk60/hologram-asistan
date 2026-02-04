@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hologram Assistant - Client</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body>
+    <div class="container">
+      <!-- SOL TARAF: KAMERA (Stream via WebSocket) -->
+      <div class="left">
+        <h3>Kamera (Python Stream)</h3>
+        <img id="camera" src="" alt="Waiting for camera..." />
+      </div>
+
+      <!-- SAĞ TARAF: ANİMASYON -->
+      <div class="right">
+        <h3>Simülasyon</h3>
+        <div
+          id="lottie-container"
+          aria-label="Hologram animasyon"
+          role="img"
+        ></div>
+
+        <!-- (Opsiyonel) Test butonu, backend olmadan animasyonu denemek için -->
+        <button id="testWaveButton" type="button">Test Wave</button>
+
+        <div id="log">Bağlanıyor...</div>
+      </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.7.6/lottie.min.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>

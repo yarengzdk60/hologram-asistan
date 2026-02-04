@@ -1,0 +1,11 @@
+numpy>=1.26.4
+opencv-python
+websockets
+aiohttp>=3.9.0
+aiohttp-cors>=0.7.0
+python-dotenv
+requests>=1.0.0
+SpeechRecognition
+PyAudio
+gTTS>=2.5.0
+elevenlabs

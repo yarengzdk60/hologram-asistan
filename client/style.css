@@ -1,0 +1,72 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #111;
+    color: white;
+}
+
+.container {
+    display: flex;
+    height: 100vh;
+}
+
+.left,
+.right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.left {
+    background: #000;
+}
+
+/* Updated for Image Feed instead of Video */
+#camera {
+    width: 90%;
+    border-radius: 10px;
+    border: 2px solid #333;
+    /* Maintain aspect ratio */
+    aspect-ratio: 4/3;
+    background: #222;
+    object-fit: contain;
+}
+
+.right {
+    background: #1a1a1a;
+}
+
+#log {
+    margin-top: 20px;
+    font-size: 14px;
+    color: #aaa;
+    font-family: monospace;
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+/* Lottie container ve test butonu için basit yerleşim */
+#lottie-container {
+    width: 220px;
+    height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 12px;
+}
+
+#testWaveButton {
+    margin-top: 4px;
+    padding: 6px 12px;
+    background: #00bcd4;
+    color: #000;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+#testWaveButton:hover {
+    background: #00e5ff;
+}
