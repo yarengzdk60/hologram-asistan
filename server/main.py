@@ -1,185 +1,109 @@
-"""
-Hologram Assistant - Main Server
-Component-based architecture
-"""
-import asyncio
+from server.components.websocket import handler, set_event_router
+from server.components.vision import VisionComponent
+from server.controllers.mode_controller import ModeController
+from server.controllers.voice_controller import VoiceController
+from server.core.task_manager import TaskManager
+from server.core.event_router import EventRouter
 import websockets
-import sys
-import io
-from pathlib import Path
-from aiohttp import web
 import aiohttp_cors
+from aiohttp import web
+import logging
+import asyncio
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Fix Windows terminal encoding for emoji
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-
-# Add project root to path
+# 1. SETUP ENVIRONMENT & PATHS (MUST BE FIRST)
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from server.components.websocket import handler, set_mode_handler, set_voice_control_handler, set_client_disconnect_handler
-from server.components.vision import VisionComponent
-from server.components.voice import VoiceComponent
+# Load .env from project root
+env_path = project_root / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# Audio output directory (Hidden to prevent Live Server reload)
+AUDIO_OUTPUT_DIR = project_root / ".audio_cache"
+AUDIO_OUTPUT_DIR.mkdir(exist_ok=True)
+
+# 2. IMPORTS (After path setup)
 
 
+# Logging Config
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger("Main")
+
+# Config
 HOST = "localhost"
-PORT = 8765
+WS_PORT = 8765
+HTTP_PORT = 8090
 
 
 async def main():
-    print("🚀 Hologram Assistant Server starting...")
+    logger.info("Initializing Hologram Assistant Backend...")
 
-    loop = asyncio.get_running_loop()
+    # 1. Initialize Core Infrastructure
+    router = EventRouter()
+    tm = TaskManager()
 
-    # Initialize components
+    # 2. Initialize Components
     vision = VisionComponent()
-    voice = VoiceComponent()
+    vc = VoiceController(tm, AUDIO_OUTPUT_DIR)
+    mc = ModeController(tm, vision, vc)
 
-    # Don't auto-start any mode - wait for frontend to send mode message
-    # Voice component starts but remains inactive
-    voice.start(loop)
+    # 3. Register Correct Event Handlers
+    router.register("voice_control:start", vc.start)
+    router.register("voice_control:stop", vc.stop)
+    router.register("mode", mc.handle)
+    router.register("internal_disconnect", mc.handle_disconnect)
 
-    # Global mode state
-    current_mode = None  # Start with no mode active
+    set_event_router(router)
 
-    # Mode change handler with guard
-    def handle_mode_change(mode):
-        nonlocal current_mode
-        
-        # MODE GUARD: Prevent spam - if already in this mode, do nothing
-        if current_mode == mode:
-            print(f"⚠️ Already in {mode} mode - ignoring redundant switch")
-            return
-        
-        try:
-            if mode == "VOICE":
-                # Check if HuggingFace API key is available
-                if not voice.hf_api_key:
-                    print("⚠️ Cannot switch to VOICE mode - HuggingFace API key not set")
-                    return
-                
-                # Stop Vision mode completely
-                if current_mode == "VISION":
-                    vision.stop()
-                    print("🛑 Vision mode stopped")
-                
-                # Activate Voice mode
-                current_mode = "VOICE"
-                voice.set_active(True)
-                print("🔄 Switched to VOICE mode")
-                
-            elif mode == "VISION":
-                # Stop Voice mode completely
-                if current_mode == "VOICE":
-                    voice.set_active(False)
-                    print("🛑 Voice mode stopped")
-                
-                # Start Vision mode
-                current_mode = "VISION"
-                if not vision.running:
-                    vision.start(loop)
-                print("🔄 Switched to VISION mode")
-            else:
-                print(f"⚠️ Unknown mode: {mode}")
-        except Exception as e:
-            print(f"⚠️ Mode change error: {e}")
-            import traceback
-            traceback.print_exc()
-
-    set_mode_handler(handle_mode_change)
-    
-    # Voice control handler
-    def handle_voice_control(action):
-        try:
-            if action == "start":
-                voice.set_active(True)
-                print("🎤 Voice recording started")
-            elif action == "stop":
-                voice.set_active(False)
-                print("🎤 Voice recording stopped")
-        except Exception as e:
-            print(f"⚠️ Voice control error: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    set_voice_control_handler(handle_voice_control)
-    
-    # Client disconnect handler
-    def handle_client_disconnect():
-        """Handle all clients disconnecting"""
-        nonlocal current_mode
-        try:
-            if current_mode == "VOICE":
-                print("🔌 All clients disconnected - deactivating Voice mode")
-                voice.set_active(False)
-        except Exception as e:
-            print(f"⚠️ Disconnect handler error: {e}")
-    
-    set_client_disconnect_handler(handle_client_disconnect)
-
-    # HTTP Server for serving audio files
+    # 4. HTTP Server (Audio Serving)
     async def serve_audio(request):
-        file_path = request.match_info.get('path', '')
-        audio_file = Path("audio_output") / file_path
-        
-        print(f"[HTTP] Audio request: {file_path}")
-        
-        if audio_file.exists() and audio_file.suffix in ['.mp3', '.wav']:
-            print(f"[HTTP] ✅ Serving: {audio_file}")
-            # Explicit CORS headers
-            headers = {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, OPTIONS',
-                'Access-Control-Allow-Headers': '*',
-                'Cache-Control': 'no-cache'
-            }
-            return web.FileResponse(audio_file, headers=headers)
-        
-        print(f"[HTTP] ❌ File not found: {audio_file}")
-        return web.Response(status=404, text="File not found")
-    
+        filename = request.match_info.get('path', '')
+        filepath = AUDIO_OUTPUT_DIR / filename
+        if filepath.exists():
+            return web.FileResponse(filepath, headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache"
+            })
+        return web.Response(status=404)
+
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
             expose_headers="*",
-            allow_headers="*",
-            allow_methods="*"
+            allow_headers="*"
         )
     })
     app.router.add_get('/audio/{path:.*}', serve_audio)
-    
+
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, HOST, 8090)
-    await site.start()
-    print(f"🌐 HTTP Server running on http://{HOST}:8090")
+    await web.TCPSite(runner, HOST, HTTP_PORT).start()
+    logger.info(f"🌐 HTTP Server: http://{HOST}:{HTTP_PORT}")
 
-    # Start WebSocket Server
+    # 5. WebSocket Server
     try:
-        async with websockets.serve(handler, HOST, PORT, ping_interval=20, ping_timeout=10):
-            print(f"🔌 WebSocket Server running on ws://{HOST}:{PORT}")
-            print("✅ Server ready - waiting for connections...")
-            try:
-                await asyncio.Future()  # run forever
-            except KeyboardInterrupt:
-                print("\n🛑 Shutting down...")
-            finally:
-                vision.stop()
-                voice.stop()
-    except Exception as e:
-        print(f"❌ Server startup error: {e}")
-        import traceback
-        traceback.print_exc()
+        async with websockets.serve(handler, HOST, WS_PORT, ping_interval=20):
+            logger.info(f"🔌 WebSocket Server: ws://{HOST}:{WS_PORT}")
+            await asyncio.Future()  # Keep alive
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("Shutdown initiated...")
+        await tm.cancel_all()
         vision.stop()
-        voice.stop()
-        raise
-
+        await runner.cleanup()
+        logger.info("Cleanup complete. Goodbye.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("🛑 Server stopped")
+        pass

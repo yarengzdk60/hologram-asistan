@@ -1,36 +1,94 @@
 <!doctype html>
-<html lang="tr">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Hologram Assistant - Client</title>
-    <link rel="stylesheet" href="style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hologram Assistant - Unified</title>
+    <link rel="stylesheet" href="css/style.css" />
   </head>
-
   <body>
-    <div class="container">
-      <!-- SOL TARAF: KAMERA (Stream via WebSocket) -->
-      <div class="left">
-        <h3>Kamera (Python Stream)</h3>
-        <img id="camera" src="" alt="Waiting for camera..." />
-      </div>
-
-      <!-- SAĞ TARAF: ANİMASYON -->
-      <div class="right">
-        <h3>Simülasyon</h3>
-        <div
-          id="lottie-container"
-          aria-label="Hologram animasyon"
-          role="img"
-        ></div>
-
-        <!-- (Opsiyonel) Test butonu, backend olmadan animasyonu denemek için -->
-        <button id="testWaveButton" type="button">Test Wave</button>
-
-        <div id="log">Bağlanıyor...</div>
+    <!-- Persistent Status Bar -->
+    <div class="status-bar">
+      <div class="title" id="mode-title">HOLOGRAM PORTAL</div>
+      <div class="ws-status">
+        <span id="ws-indicator" class="status-indicator"></span>
+        <span id="ws-text">DISCONNECTED</span>
       </div>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.7.6/lottie.min.js"></script>
-    <script src="script.js"></script>
+    <!-- 1. PORTAL VIEW (Selection) -->
+    <div id="portal-view" class="app-view active portal-container">
+      <h1 class="main-title">Select Mode</h1>
+      <div class="mode-grid">
+        <div
+          onclick="AppState.showView('vision')"
+          class="mode-card glass-panel"
+        >
+          <div class="card-icon">👁️</div>
+          <h3>Vision Mode</h3>
+          <p>Gesture & Depth Control</p>
+        </div>
+        <div onclick="AppState.showView('voice')" class="mode-card glass-panel">
+          <div class="card-icon">🎤</div>
+          <h3>Voice Mode</h3>
+          <p>Always listening - just talk</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. VISION VIEW -->
+    <div id="vision-view" class="app-view">
+      <a onclick="AppState.showView('portal')" class="btn-back">← PORTAL</a>
+      <div class="hologram-stage">
+        <div id="hologram-container"></div>
+        <div class="hologram-plate"></div>
+        <div class="hologram-glow"></div>
+      </div>
+    </div>
+
+    <!-- 3. VOICE VIEW -->
+    <div id="voice-view" class="app-view">
+      <a onclick="AppState.showView('portal')" class="btn-back">← PORTAL</a>
+      <div class="voice-container">
+        <button id="mic-btn" type="button" class="mic-button glass-panel">
+          <span id="mic-icon">🎤</span>
+          <div class="pulse-ring"></div>
+        </button>
+        <div id="voice-status" class="voice-status">IDLE</div>
+        <div id="voice-text" class="voice-text">Sizi dinliyorum... Konuşmaya başlayabilirsiniz.</div>
+      </div>
+      <div class="debug-panel glass-panel">
+        <div class="debug-title">DEBUG</div>
+        <pre id="debug-log">Waiting for events...</pre>
+      </div>
+    </div>
+
+    <!-- External Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+
+    <!-- Core Scripts -->
+    <script src="js/core.js"></script>
+    <script src="js/vision.js"></script>
+    <script src="js/voice.js"></script>
+
+    <script>
+      // SPA Initializer
+      AppState.subscribe((state) => {
+        const indicator = document.getElementById("ws-indicator");
+        const statusText = document.getElementById("ws-text");
+        const titleText = document.getElementById("mode-title");
+
+        indicator.className =
+          "status-indicator " + state.wsStatus.toLowerCase();
+        statusText.textContent = state.wsStatus;
+
+        if (state.mode === "VISION") titleText.textContent = "VISION MODE";
+        else if (state.mode === "VOICE") titleText.textContent = "VOICE MODE";
+        else titleText.textContent = "HOLOGRAM PORTAL";
+      });
+
+      // Start at Portal
+      AppState.showView("portal");
+    </script>
   </body>
 </html>

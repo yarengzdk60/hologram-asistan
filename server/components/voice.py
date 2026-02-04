@@ -1,512 +1,186 @@
-"""
-Voice Component - Voice recognition and AI response
-Optimized for async operation and better performance
-"""
-import pyaudio
-import wave
-import time
-import asyncio
 import os
+import time
 import math
+import wave
+import asyncio
 import requests
 from pathlib import Path
-from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
+import pyaudio
 import speech_recognition as sr
 from gtts import gTTS
-from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 
-from server.components.websocket import broadcast_speak
+from server.components.websocket import broadcast_speak, broadcast_error, broadcast_state
 
-
-class VoiceState(Enum):
-    """Explicit state machine for voice component"""
-    IDLE = "idle"
-    LISTENING = "listening"
-    RECORDING = "recording"
-    PROCESSING = "processing"
-
+load_dotenv()
 
 class VoiceComponent:
-    """Voice recognition and AI response component"""
+    CHUNK = 1024
+    FORMAT = pyaudio.paInt16
+    CHANNELS = 1
+    RATE = 16000
     
+    # Silence Detection
+    SILENCE_THRESHOLD = 500
+    MIN_ENERGY_THRESHOLD = 800
+    SILENCE_DURATION = 2.0
+    MIN_RECORDING_DURATION = 0.5
+
     def __init__(self):
-        # Audio settings
-        self.CHUNK = 1024
-        self.FORMAT = pyaudio.paInt16
-        self.CHANNELS = 1
-        self.RATE = 16000
-        
-        # Silence detection
-        self.SILENCE_THRESHOLD = 500  # RMS threshold
-        self.MIN_ENERGY_THRESHOLD = 300  # Minimum energy to start recording
-        self.SILENCE_DURATION = 1.5  # seconds of silence to stop recording
-        self.MIN_RECORDING_DURATION = 0.5  # minimum recording duration
-        
-        # File paths
         self.audio_dir = Path("audio_output")
         self.audio_dir.mkdir(exist_ok=True)
         
-        # Audio objects
         self.audio = None
         self.recognizer = sr.Recognizer()
+        self._executor = ThreadPoolExecutor(max_workers=5)
         
-        # State - CRITICAL: flags prevent concurrent access
         self.running = False
         self.active = False
-        self.is_recording = False  # PyAudio safety flag
-        self.is_loop_running = False  # Voice loop safety flag
-        self.state = VoiceState.IDLE  # Explicit state machine
-        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="voice")
+        self.is_recording = False
         
-        # HuggingFace API configuration
-        self.hf_api_key = os.getenv("HUGGINGFACE_API_KEY", "")
-        if self.hf_api_key:
-            self.hf_api_url = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
-            print("[OK] HuggingFace API key loaded")
-        else:
-            self.hf_api_key = None
-            self.hf_api_url = None
-            print("[WARN] HuggingFace API key not set - AI responses will be limited")
-        
-        # Initialize PyAudio lazily
+        self.api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        self.model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+
         try:
             self.audio = pyaudio.PyAudio()
-        except Exception as e:
-            print(f"⚠️ PyAudio initialization error: {e}")
-            self.audio = None
-    
-    def is_silent(self, audio_data):
-        """Check if audio chunk is silent"""
-        if not audio_data:
-            return True
-        rms = math.sqrt(sum(x * x for x in audio_data) / len(audio_data))
+        except:
+            print("❌ PyAudio failed to initialize")
+
+    async def _run_in_executor(self, func, *args):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, func, *args)
+
+    def _is_silent(self, data):
+        if not data: return True
+        rms = math.sqrt(sum(x*x for x in data)/len(data))
         return rms < self.SILENCE_THRESHOLD
-    
-    def _record_audio_sync(self):
-        """Record audio until silence is detected (synchronous, runs in executor)"""
-        # SAFETY: Prevent concurrent recording
-        if self.is_recording:
-            print("⚠️ Already recording - skipping")
-            return None
-            
-        if not self.active or not self.running:
-            return None
-        
-        if not self.audio:
-            print("❌ PyAudio not initialized")
-            return None
-            
-        self.is_recording = True
-        stream = None
+
+    def _record_sync(self):
+        if not self.audio or not self.active: return None
         
         try:
-            stream = self.audio.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.RATE,
-                input=True,
-                frames_per_buffer=self.CHUNK
-            )
-        except Exception as e:
-            print(f"❌ Failed to open audio stream: {e}")
-            self.is_recording = False
-            return None
-        
-        frames = []
-        silent_chunks = 0
-        silent_chunks_threshold = int(self.SILENCE_DURATION * self.RATE / self.CHUNK)
-        started = False
-        start_time = time.time()
-        max_energy = 0
-        
-        print("🎤 Listening...")
-        
-        try:
-            while self.running and self.active and self.is_recording:
-                try:
-                    data = stream.read(self.CHUNK, exception_on_overflow=False)
-                    audio_data = list(int.from_bytes(data[i:i+2], byteorder='little', signed=True) 
-                                     for i in range(0, len(data), 2))
-                    
-                    silent = self.is_silent(audio_data)
-                    
-                    # Calculate energy
-                    if audio_data:
-                        rms = math.sqrt(sum(x * x for x in audio_data) / len(audio_data))
-                        max_energy = max(max_energy, rms)
-                    else:
-                        rms = 0
-                    
-                    # ENERGY FILTER: Only start recording if energy exceeds threshold
-                    if not started and rms > self.MIN_ENERGY_THRESHOLD:
-                        started = True
-                        print(f"🎤 Speech detected (energy: {rms:.0f})")
-                    
-                    if not silent and started:
-                        silent_chunks = 0
-                        frames.append(data)
-                    elif started:
+            stream = self.audio.open(format=self.FORMAT, channels=self.CHANNELS,
+                                   rate=self.RATE, input=True, frames_per_buffer=self.CHUNK)
+            frames = []
+            started = False
+            silent_chunks = 0
+            max_silent = int(self.SILENCE_DURATION * self.RATE / self.CHUNK)
+            
+            print("🎤 Listening...")
+            start_time = time.time()
+            
+            while self.running and self.active:
+                data = stream.read(self.CHUNK, exception_on_overflow=False)
+                audio_data = [int.from_bytes(data[i:i+2], 'little', signed=True) for i in range(0, len(data), 2)]
+                rms = math.sqrt(sum(x*x for x in audio_data)/len(audio_data)) if audio_data else 0
+                
+                if not started and rms > self.MIN_ENERGY_THRESHOLD:
+                    started = True
+                    print("🗣️ Speech detected")
+                
+                if started:
+                    frames.append(data)
+                    if rms < self.SILENCE_THRESHOLD:
                         silent_chunks += 1
-                        frames.append(data)
-                        
-                        if silent_chunks >= silent_chunks_threshold:
-                            # Check minimum duration
-                            if time.time() - start_time >= self.MIN_RECORDING_DURATION:
-                                break
                     else:
-                        # Waiting for speech to start
-                        start_time = time.time()
-                except Exception as e:
-                    print(f"⚠️ Audio read error: {e}")
+                        silent_chunks = 0
+                    
+                    if silent_chunks > max_silent:
+                        break
+                
+                if time.time() - start_time > 15: # Max 15s recording
                     break
-        
-        finally:
-            self.is_recording = False
-            if stream:
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except:
-                    pass
-        
-        # ENERGY FILTER: Reject recording if max energy too low
-        if max_energy < self.MIN_ENERGY_THRESHOLD:
-            print(f"⚠️ Recording rejected - too quiet (max energy: {max_energy:.0f})")
-            return None
-        
-        if not frames:
-            return None
-        
-        # Save to WAV file
-        try:
-            timestamp = int(time.time())
-            wav_path = self.audio_dir / f"recording_{timestamp}.wav"
+                    
+            stream.stop_stream()
+            stream.close()
             
-            wf = wave.open(str(wav_path), 'wb')
+            if len(frames) < 10: return None
+            
+            path = self.audio_dir / f"rec_{int(time.time())}.wav"
+            wf = wave.open(str(path), 'wb')
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(self.audio.get_sample_size(self.FORMAT))
             wf.setframerate(self.RATE)
             wf.writeframes(b''.join(frames))
             wf.close()
-            
-            print(f"💾 Audio saved: {wav_path}")
-            return wav_path
+            return path
         except Exception as e:
-            print(f"❌ Failed to save audio: {e}")
+            print(f"❌ Recording error: {e}")
             return None
-    
-    async def record_audio(self):
-        """Record audio until silence is detected (async wrapper)"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self._record_audio_sync)
-    
-    def _speech_to_text_sync(self, audio_path):
-        """Convert speech to text using Google Speech Recognition (synchronous)"""
-        try:
-            with sr.AudioFile(str(audio_path)) as source:
-                audio = self.recognizer.record(source)
-            
-            text = self.recognizer.recognize_google(audio, language='tr-TR')
-            print(f"📝 Transcribed: {text}")
-            return text
-        except sr.UnknownValueError:
-            print("❌ Could not understand audio")
-            return None
-        except sr.RequestError as e:
-            print(f"❌ Speech recognition error: {e}")
-            return None
-        except Exception as e:
-            print(f"❌ Speech recognition exception: {e}")
-            return None
-    
-    async def speech_to_text(self, audio_path):
-        """Convert speech to text using Google Speech Recognition (async wrapper)"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self._speech_to_text_sync, audio_path)
-    
-    def _ask_ai_sync(self, question):
-        """Ask question to AI and get response using HuggingFace (synchronous)"""
-        if not self.hf_api_key:
-            print("[AI] ⚠️ HuggingFace API key not set")
-            return "Üzgünüm, AI API anahtarı ayarlanmamış."
-        
-        print(f"[AI] 🚀 Sending request to HuggingFace API")
-        print(f"[AI] 📝 Question: '{question}'")
-        
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.hf_api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "inputs": question,
-                "parameters": {
-                    "max_length": 150,
-                    "temperature": 0.7,
-                    "top_p": 0.9,
-                    "do_sample": True
-                }
-            }
-            
-            print(f"[AI] 🌐 Making HTTP POST to {self.hf_api_url}")
-            response = requests.post(
-                self.hf_api_url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            print(f"[AI] 📡 Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                print(f"[AI] 📦 Raw response: {result}")
-                
-                # HuggingFace returns list of dicts with 'generated_text'
-                if isinstance(result, list) and len(result) > 0:
-                    if 'generated_text' in result[0]:
-                        answer = result[0]['generated_text'].strip()
-                    elif 'text' in result[0]:
-                        answer = result[0]['text'].strip()
-                    else:
-                        # Fallback: use first value
-                        answer = str(result[0]).strip()
-                else:
-                    answer = str(result).strip()
-                
-                # Clean up response
-                if not answer or len(answer) < 3:
-                    print(f"[AI] ⚠️ Response too short: '{answer}'")
-                    return "Üzgünüm, cevap oluşturamadım."
-                
-                print(f"[AI] ✅ Response: '{answer}'")
-                return answer
-                
-            elif response.status_code == 503:
-                print(f"[AI] ⚠️ Model loading (503), retrying...")
-                # Model is loading, wait and retry once
-                time.sleep(5)
-                response = requests.post(self.hf_api_url, headers=headers, json=payload, timeout=30)
-                if response.status_code == 200:
-                    result = response.json()
-                    if isinstance(result, list) and len(result) > 0:
-                        answer = result[0].get('generated_text', '').strip()
-                        if answer:
-                            print(f"[AI] ✅ Response after retry: '{answer}'")
-                            return answer
-                
-                print(f"[AI] ❌ Model still loading after retry")
-                return "Üzgünüm, AI modeli yükleniyor. Lütfen tekrar deneyin."
-                
-            else:
-                print(f"[AI] ❌ API error: {response.status_code}")
-                print(f"[AI] ❌ Response body: {response.text}")
-                
-                # Send error to frontend
-                from server.components.websocket import broadcast_error
-                try:
-                    loop = asyncio.get_event_loop()
-                    asyncio.run_coroutine_threadsafe(
-                        broadcast_error(f"AI API hatası: {response.status_code}"),
-                        loop
-                    )
-                except:
-                    pass
-                
-                return "Üzgünüm, AI servisi şu an yanıt veremiyor."
-                
-        except requests.exceptions.Timeout:
-            print(f"[AI] ❌ Request timeout")
-            return "Üzgünüm, AI yanıt vermedi (timeout)."
-        except requests.exceptions.RequestException as e:
-            print(f"[AI] ❌ Request error: {e}")
-            return "Üzgünüm, AI bağlantı hatası."
-        except Exception as e:
-            print(f"[AI] ❌ Unexpected error: {e}")
-            import traceback
-            traceback.print_exc()
-            return "Üzgünüm, bir hata oluştu."
-    
-    async def ask_ai(self, question):
-        """Ask question to AI and get response (async wrapper)"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self._ask_ai_sync, question)
-    
-    def _text_to_speech_sync(self, text, lang='tr'):
-        """Convert text to speech and save as MP3 (synchronous)"""
-        try:
-            tts = gTTS(text=text, lang=lang, slow=False)
-            timestamp = int(time.time())
-            mp3_path = self.audio_dir / f"response_{timestamp}.mp3"
-            tts.save(str(mp3_path))
-            
-            # Get duration (approximate: ~150 words per minute)
-            word_count = len(text.split())
-            duration = (word_count / 150) * 60  # seconds
-            
-            print(f"🔊 TTS saved: {mp3_path} (duration: {duration:.1f}s)")
-            return mp3_path, duration
-        except Exception as e:
-            print(f"❌ TTS error: {e}")
-            return None, 0
-    
-    async def text_to_speech(self, text, lang='tr'):
-        """Convert text to speech and save as MP3 (async wrapper)"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self._text_to_speech_sync, text, lang)
-    
-    async def process_voice_async(self):
-        """Main voice processing loop (fully async)"""
-        # LOOP GUARD: Prevent multiple concurrent loops
-        if self.is_loop_running:
-            print("⚠️ Voice loop already running - ignoring")
-            return
-        
-        self.is_loop_running = True
-        print("🎤 Voice component async loop started")
-        
-        try:
-            while self.running:
-                if not self.active:
-                    self.state = VoiceState.IDLE
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                try:
-                    # STATE: LISTENING
-                    self.state = VoiceState.LISTENING
-                    print(f"[STATE] {self.state.value}")
-                    
-                    # Record audio (async)
-                    self.state = VoiceState.RECORDING
-                    print(f"[STATE] {self.state.value}")
-                    audio_path = await self.record_audio()
-                    if not audio_path:
-                        self.state = VoiceState.IDLE
-                        await asyncio.sleep(0.1)
-                        continue
-                    
-                    # STATE: PROCESSING
-                    self.state = VoiceState.PROCESSING
-                    print(f"[STATE] {self.state.value} - Starting STT")
-                    
-                    # Speech to text (async)
-                    text = await self.speech_to_text(audio_path)
-                    if not text:
-                        print("[STT] No text recognized")
-                        self.state = VoiceState.IDLE
-                        await asyncio.sleep(0.1)
-                        continue
-                    
-                    print(f"[STT] ✅ Recognized: '{text}'")
-                    
-                    # Ask AI (async)
-                    print(f"[AI] Calling HuggingFace with question: '{text}'")
 
-                    response = await self.ask_ai(text)
-                    print(f"[AI] ✅ Response received: '{response[:50]}...' (length: {len(response)})")
-                    
-                    # VALIDATION: Only proceed with TTS if we have a valid response
-                    
-                    if not response:
-                     response = "Seni duyuyorum ama şu an cevap oluşturamıyorum."
-                    # Text to speech (async)
-                    print(f"[TTS] Generating speech for: '{response[:50]}...'")
-                    mp3_path, duration = await self.text_to_speech(response)
-                    if not mp3_path:
-                        print("[TTS] ⚠️ Failed to generate audio")
-                        self.state = VoiceState.IDLE
-                        await asyncio.sleep(0.1)
-                        continue
-                    
-                    print(f"[TTS] ✅ Generated: {mp3_path} (duration: {duration:.1f}s)")
-                    
-                    # Broadcast to clients - use HTTP URL for audio file
-                    filename = mp3_path.name
-                    audio_url = f"http://localhost:8090/audio/{filename}"
-                    print(f"[BROADCAST] Sending audio URL to clients: {audio_url}")
-                    await broadcast_speak(audio_url, duration)
-                    print("[BROADCAST] ✅ Audio URL sent to clients")
-                    
-                    # Cleanup old audio files (keep last 5) - non-blocking
-                    asyncio.create_task(self._cleanup_old_files_async())
-                    
-                    # Back to IDLE
-                    self.state = VoiceState.IDLE
-                    
-                except Exception as e:
-                    print(f"❌ Voice processing error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.state = VoiceState.IDLE
-                    await asyncio.sleep(0.5)
-        finally:
-            self.is_loop_running = False
-            print("🎤 Voice loop stopped")
-    
-    async def _cleanup_old_files_async(self, keep=5):
-        """Clean up old audio files asynchronously"""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self._executor, self._cleanup_old_files_sync, keep)
-    
-    def _cleanup_old_files_sync(self, keep=5):
-        """Clean up old audio files, keep only the most recent ones (synchronous)"""
+    def _stt_sync(self, path):
         try:
-            wav_files = sorted(self.audio_dir.glob("*.wav"), key=os.path.getmtime, reverse=True)
-            mp3_files = sorted(self.audio_dir.glob("*.mp3"), key=os.path.getmtime, reverse=True)
-            
-            for old_file in wav_files[keep:]:
-                try:
-                    old_file.unlink()
-                except:
-                    pass
-            for old_file in mp3_files[keep:]:
-                try:
-                    old_file.unlink()
-                except:
-                    pass
+            with sr.AudioFile(str(path)) as source:
+                audio = self.recognizer.record(source)
+            return self.recognizer.recognize_google(audio, language='tr-TR')
+        except:
+            return None
+
+    def _gemini_sync(self, prompt):
+        if not self.api_key: return "API key missing"
+        
+        url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent?key={self.api_key}"
+        body = {
+            "contents": [{"parts": [{"text": f"Kısa ve öz cevap ver. Soru: {prompt}"}]}]
+        }
+        
+        try:
+            resp = requests.post(url, json=body, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                print(f"❌ Gemini Error {resp.status_code}: {resp.text}")
+                return f"Hata: {resp.status_code}"
         except Exception as e:
-            print(f"⚠️ Cleanup error: {e}")
-    
-    def start(self, loop: asyncio.AbstractEventLoop):
-        """Start the voice component"""
-        if self.running:
-            print("⚠️ Voice component already running")
-            return
+            return f"Bağlantı hatası: {e}"
+
+    def _tts_sync(self, text):
+        try:
+            path = self.audio_dir / f"resp_{int(time.time())}.mp3"
+            tts = gTTS(text=text, lang='tr')
+            tts.save(str(path))
+            return path
+        except:
+            return None
+
+    async def voice_loop(self):
         self.running = True
-        asyncio.create_task(self.process_voice_async())
-        print("🎤 Voice component started (async)")
-    
+        while self.running:
+            if not self.active:
+                await asyncio.sleep(0.5)
+                continue
+            
+            await broadcast_state("LISTENING")
+            path = await self._run_in_executor(self._record_sync)
+            
+            if path and self.active:
+                await broadcast_state("WAITING")
+                
+                text = await self._run_in_executor(self._stt_sync, path)
+                if text:
+                    print(f"👤 User: {text}")
+                    response = await self._run_in_executor(self._gemini_sync, text)
+                    print(f"🤖 AI: {response}")
+                    
+                    audio_path = await self._run_in_executor(self._tts_sync, response)
+                    if audio_path:
+                        # Serve via HTTP
+                        url = f"http://localhost:8090/audio/{audio_path.name}"
+                        await broadcast_speak(url, 5.0, response)
+                        # App state will be IDLE after broadcast_speak handles the event
+                
+            await broadcast_state("IDLE")
+            await asyncio.sleep(0.1)
+
+    def start(self, loop):
+        asyncio.create_task(self.voice_loop())
+
     def stop(self):
-        """Stop the voice component"""
         self.running = False
         self.active = False
-        self.is_recording = False  # Force stop any recording
-        
-        if self.audio:
-            try:
-                self.audio.terminate()
-                self.audio = None
-            except:
-                pass
-        
-        if self._executor:
-            try:
-                self._executor.shutdown(wait=False)
-            except:
-                pass
-        print("🎤 Voice component stopped")
-    
-    def set_active(self, active: bool):
-        """Set voice component active/inactive"""
-        # ACTIVATION GUARD: Prevent redundant calls
-        if self.active == active:
-            print(f"⚠️ Voice already {'active' if active else 'inactive'} - ignoring")
-            return
-        
+
+    def set_active(self, active):
         self.active = active
-        if active:
-            print("🎤 Voice component activated")
-        else:
-            print("🎤 Voice component deactivated")
+        print(f"🎤 Voice component: {'ACTIVE' if active else 'INACTIVE'}")
